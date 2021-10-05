@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -16,6 +18,13 @@ import (
 
 type Feedback struct {
 	log *zap.Logger
+}
+
+type clientInfo struct {
+	RemoteAddr string
+	IP string
+	Port string
+	XForwardedFor string `json:"X-Forwarded-For"`
 }
 
 func returnListeningServer(addr string, handler http.Handler) *http.Server {
@@ -40,6 +49,34 @@ func (f *Feedback) wildcardHandler(_ http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		logFields.Error("failed to close body", zap.String("error", err.Error()))
 	}
+}
+
+func (f *Feedback) identCaller(w http.ResponseWriter, r *http.Request) {
+	logFields := f.log.WithOptions(zap.Fields(zap.String("url", r.URL.String())))
+	logFields.Info("received request")
+
+	_, _ = io.Copy(ioutil.Discard, r.Body)
+	err := r.Body.Close()
+	if err != nil {
+		logFields.Error("failed to close body", zap.String("error", err.Error()))
+	}
+
+	ci := &clientInfo{
+		RemoteAddr: r.RemoteAddr,
+		XForwardedFor: r.Header.Get("X-Forwarded-For")}
+	ci.IP, ci.Port, _ = net.SplitHostPort(r.RemoteAddr)
+
+	var b []byte
+	b, err = json.Marshal(ci)
+	if err != nil {
+		f.log.Error(err.Error())
+	}
+
+	_, err = w.Write(b)
+	if err != nil {
+		f.log.Error(err.Error())
+	}
+
 }
 
 func main() {
@@ -73,6 +110,7 @@ func main() {
 	// http router that listens to anything and just returns a 200
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", f.wildcardHandler)
+	mux.HandleFunc("/ident", f.identCaller)
 
 	// setup server
 	server := returnListeningServer(lp, mux)
